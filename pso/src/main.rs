@@ -89,18 +89,12 @@ struct TopLevel {
     #[arg(long)]
     name: String,
     /// The root's secret key, to sign with
-    #[arg(
-        long,
-        value_name = "SECRET",
-        requires = "key",
-        conflicts_with = "self_signed"
-    )]
+    #[arg(long, value_name = "SECRET", conflicts_with = "self_signed")]
     root_key: Option<PathBuf>,
-    /// The public key the certificate is for, when a root signs it
-    #[arg(long, value_name = "PUBLIC")]
-    key: Option<PathBuf>,
+    #[command(flatten)]
+    subject: Subject,
     /// The certificate's own secret key, to sign itself with
-    #[arg(long, value_name = "SECRET")]
+    #[arg(long, value_name = "SECRET", conflicts_with_all = ["key", "new_key"])]
     self_signed: Option<PathBuf>,
     /// A warrant the certificate holds; repeat for each
     #[arg(long = "warrant", value_name = "WARRANT")]
@@ -109,14 +103,51 @@ struct TopLevel {
     out: PathBuf,
 }
 
+/// The key a certificate is for: one that exists, or one made for it.
+#[derive(Args)]
+struct Subject {
+    /// The public key the certificate is for, where someone else holds its secret key
+    #[arg(long, value_name = "PUBLIC", conflicts_with = "new_key")]
+    key: Option<PathBuf>,
+    /// Make a key for the certificate: its secret key goes here, and its
+    /// public key beside it, with .pub added
+    #[arg(long, value_name = "FILE")]
+    new_key: Option<PathBuf>,
+    /// The type of the key --new-key makes
+    #[arg(
+        long,
+        value_name = "TYPE",
+        default_value = "ml-dsa-65",
+        requires = "new_key"
+    )]
+    key_type: String,
+}
+
+impl Subject {
+    /// The public key the certificate is for, and the secret key to save
+    /// once the certificate is issued, if one was made.
+    fn resolve(&self) -> Result<(Key, Option<(SecretKey, &Path)>)> {
+        match (&self.key, &self.new_key) {
+            (Some(public), None) => Ok((keys::load_public(public)?, None)),
+            (None, Some(path)) => {
+                if path.exists() {
+                    bail!("{}: exists, and a key is never replaced", path.display());
+                }
+                let secret = SecretKey::generate(keys::key_type_from_name(&self.key_type)?)?;
+                Ok((secret.public(), Some((secret, path))))
+            }
+            _ => bail!("give --key or --new-key"),
+        }
+    }
+}
+
 #[derive(Args)]
 struct Intermediary {
     /// A description of the holder, for a person
     #[arg(long)]
     name: String,
-    /// The public key the certificate is for
-    #[arg(long, value_name = "PUBLIC")]
-    key: PathBuf,
+    #[command(flatten)]
+    subject: Subject,
     /// The issuing certificate
     #[arg(long, value_name = "CERTIFICATE")]
     issuer: PathBuf,
@@ -307,15 +338,41 @@ fn new_key(new: &NewKey, default_type: KeyType) -> Result<()> {
         None => default_type,
     };
     let secret = SecretKey::generate(key_type)?;
-    let public = secret.public();
-    let mut public_path = new.out.clone().into_os_string();
+    save_key_pair(&secret, &new.out)?;
+    print_public(&secret.public());
+    Ok(())
+}
+
+/// Writes `secret` to a new file at `path`, and its public key beside it.
+fn save_key_pair(secret: &SecretKey, path: &Path) -> Result<()> {
+    let mut public_path = path.to_owned().into_os_string();
     public_path.push(PUBLIC_SUFFIX);
-    secret.save(&new.out)?;
+    secret.save(path)?;
     write_new(
         Path::new(&public_path),
-        keys::format_public(&public).as_bytes(),
-    )?;
-    print_public(&public);
+        keys::format_public(&secret.public()).as_bytes(),
+    )
+}
+
+/// Writes a certificate and, if a key was made for it, the key. The
+/// certificate is issued before anything is written, so a refusal leaves
+/// no key behind.
+fn save_certificate(
+    out: &Path,
+    certificate: &Certificate,
+    made: Option<(SecretKey, &Path)>,
+) -> Result<()> {
+    if out.exists() {
+        bail!(
+            "{}: exists, and a certificate is never replaced",
+            out.display()
+        );
+    }
+    if let Some((secret, path)) = made {
+        save_key_pair(&secret, path)?;
+    }
+    write_new(out, certificate.bytes())?;
+    println!("{}", hex::encode(&certificate.hash(&RustCrypto)));
     Ok(())
 }
 
@@ -342,34 +399,43 @@ fn certificate(path: &Path) -> Result<Certificate> {
 
 fn top_level(args: &TopLevel) -> Result<()> {
     let warrants = parse_warrants(&args.warrants)?;
-    let certificate = match (&args.root_key, &args.key, &args.self_signed) {
-        (Some(root), Some(key), None) => issue::top_level_under_root(
-            &SecretKey::load(root)?,
-            &args.name,
-            &keys::load_public(key)?,
-            warrants,
-        )?,
-        (None, None, Some(own)) => {
-            issue::top_level_self_signed(&SecretKey::load(own)?, &args.name, warrants)?
+    let (certificate, made) = match (&args.root_key, &args.self_signed) {
+        (Some(root), None) => {
+            let (subject, made) = args.subject.resolve()?;
+            let root = SecretKey::load(root)?;
+            (
+                issue::top_level_under_root(&root, &args.name, &subject, warrants)?,
+                made,
+            )
         }
-        _ => bail!("give --root-key with --key, or --self-signed"),
+        (None, Some(own)) => (
+            issue::top_level_self_signed(&SecretKey::load(own)?, &args.name, warrants)?,
+            None,
+        ),
+        // A new key with no root to sign for it signs itself.
+        (None, None) if args.subject.new_key.is_some() => {
+            let (_, made) = args.subject.resolve()?;
+            let (secret, path) = made.expect("--new-key makes a key");
+            let certificate = issue::top_level_self_signed(&secret, &args.name, warrants)?;
+            (certificate, Some((secret, path)))
+        }
+        _ => bail!(
+            "give --root-key, --self-signed, or --new-key alone to make a key that signs itself"
+        ),
     };
-    write_new(&args.out, certificate.bytes())?;
-    println!("{}", hex::encode(&certificate.hash(&RustCrypto)));
-    Ok(())
+    save_certificate(&args.out, &certificate, made)
 }
 
 fn intermediary(args: &Intermediary) -> Result<()> {
+    let (subject, made) = args.subject.resolve()?;
     let certificate = issue::intermediary(
         &certificate(&args.issuer)?,
         &SecretKey::load(&args.issuer_key)?,
         &args.name,
-        &keys::load_public(&args.key)?,
+        &subject,
         parse_warrants(&args.warrants)?,
     )?;
-    write_new(&args.out, certificate.bytes())?;
-    println!("{}", hex::encode(&certificate.hash(&RustCrypto)));
-    Ok(())
+    save_certificate(&args.out, &certificate, made)
 }
 
 fn sign(args: &Sign) -> Result<()> {

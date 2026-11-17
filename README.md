@@ -30,31 +30,33 @@ read, and its public key in `root.key.pub`:
 pso root --out root.key
 ```
 
-Make a key for a top-level and have the root sign a certificate for it.
-The command prints the certificate's hash, which is its file name in a
-trust store:
+Have the root sign a top-level certificate, making a key for it in the
+same step. The key goes in `top.key` and `top.key.pub`, and the command
+prints the certificate's hash, which is its file name in a trust store:
 
 ```sh
-pso key new --out top.key
 pso cert top-level --name "Example Top-Level" \
-    --root-key root.key --key top.key.pub \
+    --root-key root.key --new-key top.key \
     --warrant Delegate=2 --warrant Name=example.com \
     --warrant Revoke --warrant Repository \
     --out top.cert
 ```
 
-A top-level can sign itself instead, with `--self-signed top.key`. A
-verifier reports a chain beneath one as Unrooted.
+Without `--root-key`, the new key signs its own certificate. A verifier
+reports a chain beneath such a top-level as Unrooted.
 
 Issue a signing certificate beneath the top-level:
 
 ```sh
-pso key new --out signer.key
 pso cert intermediary --name "Example Signing 1" \
-    --key signer.key.pub --issuer top.cert --issuer-key top.key \
+    --new-key signer.key --issuer top.cert --issuer-key top.key \
     --warrant Name=pkgs.example.com --warrant Repository \
     --out signer.cert
 ```
+
+Where someone else holds the secret key, such as a partner who sends only
+their public key, give `--key <file>.pub` in place of `--new-key`. `pso key
+new` makes a key without a certificate.
 
 Sign a file. The bundle goes beside it, as `repository.pso`:
 

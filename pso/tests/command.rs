@@ -246,3 +246,127 @@ fn a_key_hash_is_the_same_from_either_key_file() {
     fs::write(directory.join("notes"), "not a key").unwrap();
     assert!(!pso(directory, &["key", "public", "notes"]).status.success());
 }
+
+#[test]
+fn a_certificate_can_be_issued_with_a_key_made_for_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let directory = directory.path();
+    ok(directory, &["root", "--out", "root.key"]);
+    ok(
+        directory,
+        &[
+            "cert",
+            "top-level",
+            "--name",
+            "Top",
+            "--root-key",
+            "root.key",
+            "--new-key",
+            "top.key",
+            "--warrant",
+            "Delegate=1",
+            "--warrant",
+            "Name=example.com",
+            "--out",
+            "top.cert",
+        ],
+    );
+    ok(
+        directory,
+        &[
+            "cert",
+            "intermediary",
+            "--name",
+            "Signing",
+            "--new-key",
+            "signer.key",
+            "--issuer",
+            "top.cert",
+            "--issuer-key",
+            "top.key",
+            "--warrant",
+            "Name=example.com",
+            "--out",
+            "signer.cert",
+        ],
+    );
+    // The keys made are the certificates' own: the signing key signs.
+    fs::write(directory.join("file"), "bytes").unwrap();
+    ok(
+        directory,
+        &[
+            "sign",
+            "file",
+            "--issuer",
+            "signer.cert",
+            "--issuer-key",
+            "signer.key",
+            "--name",
+            "example.com",
+        ],
+    );
+    assert!(directory.join("top.key.pub").exists());
+
+    // A key that signs itself needs no root.
+    ok(
+        directory,
+        &[
+            "cert",
+            "top-level",
+            "--name",
+            "Own",
+            "--new-key",
+            "own.key",
+            "--out",
+            "own.cert",
+        ],
+    );
+    assert!(ok(directory, &["show", "own.cert"]).contains("(itself)"));
+}
+
+#[test]
+fn a_refused_certificate_leaves_no_key_behind() {
+    let directory = tempfile::tempdir().unwrap();
+    let directory = directory.path();
+    authority(directory);
+    // The signing certificate holds no Delegate, so this is refused.
+    let refused = pso(
+        directory,
+        &[
+            "cert",
+            "intermediary",
+            "--name",
+            "Below",
+            "--new-key",
+            "below.key",
+            "--issuer",
+            "signer.cert",
+            "--issuer-key",
+            "signer.key",
+            "--out",
+            "below.cert",
+        ],
+    );
+    assert!(!refused.status.success());
+    assert!(!directory.join("below.key").exists());
+    assert!(!directory.join("below.key.pub").exists());
+
+    // Nor is an existing key or certificate replaced.
+    let existing = pso(
+        directory,
+        &[
+            "cert",
+            "top-level",
+            "--name",
+            "Again",
+            "--root-key",
+            "root.key",
+            "--new-key",
+            "top.key",
+            "--out",
+            "again.cert",
+        ],
+    );
+    assert!(!existing.status.success());
+    assert!(!directory.join("again.cert").exists());
+}

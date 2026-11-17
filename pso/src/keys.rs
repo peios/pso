@@ -140,9 +140,13 @@ pub fn format_public(key: &Key) -> String {
 /// Reads the public key file at `path`.
 pub fn load_public(path: &Path) -> Result<Key> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let (key_type, bytes) = parse_line(&text, PUBLIC_LABEL)
-        .with_context(|| format!("{}: not a public key file", path.display()))?;
-    Key::new(key_type, bytes).map_err(|_| anyhow!("{}: a key of the wrong length", path.display()))
+    parse_public(&text).with_context(|| format!("{}", path.display()))
+}
+
+/// The public key that `text`, the content of a public key file, holds.
+pub fn parse_public(text: &str) -> Result<Key> {
+    let (key_type, bytes) = parse_line(text, PUBLIC_LABEL).context("not a public key file")?;
+    Key::new(key_type, bytes).map_err(|_| anyhow!("a key of the wrong length"))
 }
 
 fn parse_line(text: &str, label: &str) -> Result<(KeyType, Vec<u8>)> {

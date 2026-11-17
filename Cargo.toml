@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["pso-core", "pso"]
+
+# pso is its own workspace root.
+#
+#   pso-core  objects, warrants and verification, as PGSS Signed Objects
+#             specifies them. No I/O and no standard library, so that a
+#             kernel can share it.
+#   pso       keys, issuing, the trust store's directories, the places a
+#             bundle is carried, and the `pso` command.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"

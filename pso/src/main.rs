@@ -61,8 +61,8 @@ enum Command {
 enum KeyCommand {
     /// Make a key
     New(NewKey),
-    /// Print the public key and key hash of a secret key
-    Public { secret: PathBuf },
+    /// Print the type and key hash of a key, from its secret or its public key file
+    Public { key: PathBuf },
 }
 
 #[derive(Args)]
@@ -258,9 +258,7 @@ fn run(command: Command) -> Result<ExitCode> {
     match command {
         Command::Root(new) => new_key(&new, KeyType::MlDsa87)?,
         Command::Key(KeyCommand::New(new)) => new_key(&new, KeyType::MlDsa65)?,
-        Command::Key(KeyCommand::Public { secret }) => {
-            print_public(&SecretKey::load(&secret)?.public())
-        }
+        Command::Key(KeyCommand::Public { key }) => print_public(&public_of(&key)?),
         Command::Cert(CertCommand::TopLevel(args)) => top_level(&args)?,
         Command::Cert(CertCommand::Intermediary(args)) => intermediary(&args)?,
         Command::Sign(args) => sign(&args)?,
@@ -319,6 +317,17 @@ fn new_key(new: &NewKey, default_type: KeyType) -> Result<()> {
     )?;
     print_public(&public);
     Ok(())
+}
+
+/// The public key that the key file at `path` holds or, for a secret key
+/// file, gives.
+fn public_of(path: &Path) -> Result<Key> {
+    match keys::load_public(path) {
+        Ok(key) => Ok(key),
+        Err(_) => Ok(SecretKey::load(path)
+            .map_err(|_| anyhow!("{}: not a key file", path.display()))?
+            .public()),
+    }
 }
 
 fn print_public(key: &Key) {

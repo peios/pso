@@ -235,3 +235,14 @@ fn a_secret_key_is_never_replaced_and_only_its_owner_reads_it() {
     );
     assert_eq!(fs::read(directory.join("root.key")).unwrap(), before);
 }
+
+#[test]
+fn a_key_hash_is_the_same_from_either_key_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let directory = directory.path();
+    let made = ok(directory, &["root", "--out", "root.key"]);
+    assert_eq!(ok(directory, &["key", "public", "root.key"]), made);
+    assert_eq!(ok(directory, &["key", "public", "root.key.pub"]), made);
+    fs::write(directory.join("notes"), "not a key").unwrap();
+    assert!(!pso(directory, &["key", "public", "notes"]).status.success());
+}

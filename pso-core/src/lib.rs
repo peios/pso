@@ -25,9 +25,11 @@ pub use crypto::{Crypto, HASH_LEN, Hash, Key, KeyType, Unavailable};
 pub use object::{
     Bundle, Certificate, CertificateBody, Distrust, FORMAT_VERSION, HashForm, Kind, Leaf, LeafBody,
     MAX_BUNDLE_CERTIFICATES, MAX_BUNDLE_LEN, MAX_FOUND_CERTIFICATE_LEN, MAX_INTERMEDIARIES,
-    Malformed, Revocation, RevocationBody, Role, TargetType, encode_bundle,
+    MAX_STORE_IMAGE_LEN, Malformed, Revocation, RevocationBody, Role, TargetType,
+    decode_store_image, encode_bundle, encode_store_image,
 };
 pub use verify::{
-    Invalid, Lookup, NoLookup, Outcome, Refusal, TrustStore, Verified, Verifier, check_narrowing,
+    ImageError, Invalid, Lookup, NoLookup, Outcome, Refusal, Skipped, TrustStore, Verified,
+    Verifier, check_narrowing,
 };
 pub use warrant::{DELEGATE, NAME, REVOKE, Warrant, WarrantType, name_is_within, valid_leaf_name};

@@ -6,8 +6,9 @@ use alloc::vec::Vec;
 
 use crate::crypto::{Crypto, Hash, Key, Unavailable};
 use crate::object::{
-    Bundle, Certificate, Distrust, HashForm, Leaf, MAX_FOUND_CERTIFICATE_LEN, MAX_INTERMEDIARIES,
-    Malformed, Revocation, Role, TargetType,
+    Bundle, Certificate, Distrust, HashForm, Kind, Leaf, MAX_FOUND_CERTIFICATE_LEN,
+    MAX_INTERMEDIARIES, Malformed, Revocation, Role, TargetType, decode_store_image,
+    encode_store_image,
 };
 use crate::warrant::{self, DELEGATE, NAME, NarrowError, REVOKE, Warrant, name_is_within};
 
@@ -54,12 +55,139 @@ impl TrustStore {
         self.top_levels.iter().map(|(hash, _)| hash)
     }
 
+    /// The enabled top-levels, each still encoded.
+    pub fn top_levels(&self) -> impl Iterator<Item = &[u8]> {
+        self.top_levels.iter().map(|(_, bytes)| &bytes[..])
+    }
+
+    /// Adds one object as a kernel adds an entry of the store image or an
+    /// object a store keeper hands it (PSPK §6.3): a top-level, a
+    /// revocation or a distrust entry.
+    ///
+    /// A top-level whose issuer is one of `roots`, or its own key, must
+    /// carry that key's signature. One whose issuer is any other key is
+    /// enabled with its signature unchecked, because there is no key to
+    /// check it with.
+    pub fn add(
+        &mut self,
+        crypto: &dyn Crypto,
+        roots: &[Key],
+        object: &[u8],
+    ) -> Result<Result<(), Skipped>, Unavailable> {
+        let kind = match Kind::of(object) {
+            Ok(kind) => kind,
+            Err(malformed) => return Ok(Err(Skipped::Malformed(malformed))),
+        };
+        let added = match kind {
+            Kind::Certificate => match Certificate::decode(object) {
+                Ok(certificate) if certificate.body.role != Role::TopLevel => {
+                    Err(Skipped::NotStored)
+                }
+                Ok(certificate) => {
+                    let issuer = certificate.body.issuer;
+                    let own = &certificate.body.key;
+                    let signer = roots
+                        .iter()
+                        .find(|root| root.hash(crypto) == issuer)
+                        .or_else(|| (own.hash(crypto) == issuer).then_some(own));
+                    let sound = match signer {
+                        Some(key) => {
+                            certificate.signature().len() == key.key_type.signature_len()
+                                && crypto.verify(
+                                    key,
+                                    certificate.signed_bytes(),
+                                    certificate.signature(),
+                                )?
+                        }
+                        None => true,
+                    };
+                    if sound {
+                        self.enable(crypto, object)
+                            .map(|_| ())
+                            .map_err(Skipped::Malformed)
+                    } else {
+                        Err(Skipped::BadSignature)
+                    }
+                }
+                Err(malformed) => Err(Skipped::Malformed(malformed)),
+            },
+            Kind::Revocation => Revocation::decode(object)
+                .map(|revocation| {
+                    if !self.revocations.contains(&revocation) {
+                        self.revocations.push(revocation);
+                    }
+                })
+                .map_err(Skipped::Malformed),
+            Kind::Distrust => Distrust::decode(object)
+                .map(|entry| {
+                    if !self.distrust.contains(&entry) {
+                        self.distrust.push(entry);
+                    }
+                })
+                .map_err(Skipped::Malformed),
+            Kind::Leaf | Kind::Bundle | Kind::StoreImage => Err(Skipped::NotStored),
+        };
+        Ok(added)
+    }
+
+    /// The store a store image holds, and each entry that was passed over,
+    /// by its position (PSPK §6.3).
+    ///
+    /// An image that is malformed as a whole is an error, which a kernel
+    /// answers by starting with an empty store.
+    pub fn from_image(
+        crypto: &dyn Crypto,
+        roots: &[Key],
+        image: &[u8],
+    ) -> Result<(Self, Vec<(usize, Skipped)>), ImageError> {
+        let mut store = Self::new();
+        let mut skipped = Vec::new();
+        let objects = decode_store_image(image).map_err(ImageError::Malformed)?;
+        for (index, object) in objects.into_iter().enumerate() {
+            if let Err(why) = store
+                .add(crypto, roots, object)
+                .map_err(ImageError::Unavailable)?
+            {
+                skipped.push((index, why));
+            }
+        }
+        Ok((store, skipped))
+    }
+
+    /// The store image holding everything this store holds.
+    pub fn to_image(&self) -> Result<Vec<u8>, Malformed> {
+        let distrust: Vec<Vec<u8>> = self.distrust.iter().map(Distrust::encode).collect();
+        let objects: Vec<&[u8]> = self
+            .top_levels()
+            .chain(self.revocations.iter().map(Revocation::bytes))
+            .chain(distrust.iter().map(Vec::as_slice))
+            .collect();
+        encode_store_image(&objects)
+    }
+
     fn top_level(&self, hash: &Hash) -> Option<&[u8]> {
         self.top_levels
             .iter()
             .find(|(enabled, _)| enabled == hash)
             .map(|(_, bytes)| &bytes[..])
     }
+}
+
+/// Why one object was not added to a store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skipped {
+    Malformed(Malformed),
+    /// Not a top-level, a revocation or a distrust entry.
+    NotStored,
+    /// A top-level whose root, or own key, did not sign it.
+    BadSignature,
+}
+
+/// Why a store image could not be read at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageError {
+    Malformed(Malformed),
+    Unavailable(Unavailable),
 }
 
 /// How a verifier finds an intermediary that a bundle names and does not

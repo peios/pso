@@ -74,7 +74,8 @@ pso verify repository --bundle repository.pso --root root.key.pub
 
 `pso show` prints what any object holds, `pso revoke` and `pso distrust`
 withdraw a certificate or a leaf, and `pso store` lists what a system's
-trust store enables. `pso help` describes each.
+trust store enables, or with `--image` writes the store image a kernel
+reads at boot. `pso help` describes each.
 
 ## Warrants on the command line
 
@@ -104,7 +105,9 @@ Understand:
 
 ## What is not here yet
 
-- The trust store image and the ktrust channel (PSPK chapter 6).
+- The ktrust channel (PSPK chapter 6). The store image of that chapter is
+  here: `pso store --image` writes one, and `TrustStore::from_image` loads
+  one as a kernel does.
 - A store keeper: nothing here writes the trust store or asks for
   approval. `pso::store` only reads it.
 - Adding a `.pso` section to an ELF object.

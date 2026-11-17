@@ -4,7 +4,10 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use pso::core::{Certificate, Distrust, KeyType, RustCrypto, TargetType, Warrant};
+use pso::core::{
+    Certificate, Distrust, ImageError, KeyType, Malformed, RustCrypto, Skipped, TargetType,
+    TrustStore, Warrant, encode_store_image,
+};
 use pso::keys::SecretKey;
 use pso::{hex, issue, store};
 
@@ -178,4 +181,72 @@ fn a_distrusted_top_level_is_not_enabled() {
     let loaded = store::load(system.path(), &[root_key.public()]).unwrap();
     assert_eq!(loaded.store.enabled().count(), 0);
     assert_eq!(loaded.store.distrust, vec![entry]);
+}
+
+#[test]
+fn a_store_image_holds_what_the_store_holds() {
+    let system = tempfile::tempdir().unwrap();
+    let root_key = key(1);
+    let (rooted, own) = (rooted(&root_key), self_signed());
+    put(
+        system.path(),
+        store::PACKAGE_TOP_LEVELS,
+        &name(&rooted),
+        rooted.bytes(),
+    );
+    put(
+        system.path(),
+        store::LOCAL_TOP_LEVELS,
+        &name(&own),
+        own.bytes(),
+    );
+    let entry = Distrust {
+        target_type: TargetType::Leaf,
+        target: [7; 64],
+    };
+    put(
+        system.path(),
+        store::LOCAL_DISTRUST,
+        &hex::encode(&[7; 64]),
+        &entry.encode(),
+    );
+    let roots = [root_key.public()];
+    let loaded = store::load(system.path(), &roots).unwrap();
+
+    let image = loaded.store.to_image().unwrap();
+    let (read, skipped) = TrustStore::from_image(&RustCrypto, &roots, &image).unwrap();
+    assert!(skipped.is_empty());
+    assert!(read.is_enabled(&rooted.hash(&RustCrypto)));
+    assert!(read.is_enabled(&own.hash(&RustCrypto)));
+    assert_eq!(read.distrust, vec![entry]);
+}
+
+#[test]
+fn a_bad_entry_is_skipped_and_a_bad_image_is_refused_whole() {
+    let root_key = key(1);
+    let roots = [root_key.public()];
+    let rooted = rooted(&root_key);
+    // A top-level naming the root that another key signed.
+    let forged = {
+        let signature = key(9).sign(&rooted.body.to_be_signed().unwrap()).unwrap();
+        Certificate::from_signed(&rooted.body, &signature).unwrap()
+    };
+    let image = encode_store_image(&[rooted.bytes(), forged.bytes(), b"not an object"]).unwrap();
+    let (read, skipped) = TrustStore::from_image(&RustCrypto, &roots, &image).unwrap();
+    assert_eq!(read.enabled().count(), 1);
+    assert!(read.is_enabled(&rooted.hash(&RustCrypto)));
+    assert_eq!(
+        skipped,
+        vec![
+            (1, Skipped::BadSignature),
+            (2, Skipped::Malformed(Malformed::BadMagic))
+        ]
+    );
+
+    let mut trailing = image.clone();
+    trailing.push(0);
+    assert_eq!(
+        TrustStore::from_image(&RustCrypto, &roots, &trailing).err(),
+        Some(ImageError::Malformed(Malformed::TrailingBytes))
+    );
 }

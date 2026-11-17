@@ -22,6 +22,9 @@ pub const MAX_BUNDLE_LEN: usize = 65_536;
 /// The largest certificate a verifier reads when it finds one by its hash.
 pub const MAX_FOUND_CERTIFICATE_LEN: usize = 65_535;
 
+/// The largest store image a verifier reads (PSPK §6.A).
+pub const MAX_STORE_IMAGE_LEN: usize = 64 * 1024 * 1024;
+
 const MAGIC: &[u8; 3] = b"PSO";
 const HEADER_RESERVED: u8 = 0x00;
 
@@ -551,4 +554,39 @@ impl Distrust {
         out.extend_from_slice(&self.target);
         out
     }
+}
+
+/// The objects a store image holds, each still encoded (PSPK §6.3).
+///
+/// This fails only if the image is malformed as a whole. Whether each
+/// object is one a store holds, and is sound, is decided entry by entry by
+/// whoever loads it.
+pub fn decode_store_image(bytes: &[u8]) -> Result<Vec<&[u8]>, Malformed> {
+    if bytes.len() > MAX_STORE_IMAGE_LEN {
+        return Err(Malformed::TooLarge);
+    }
+    let mut reader = Reader::new(bytes);
+    expect_header(&mut reader, Kind::StoreImage)?;
+    let count = reader.u32()?;
+    let mut objects = Vec::new();
+    for _ in 0..count {
+        objects.push(reader.long_field()?);
+    }
+    reader.finish()?;
+    Ok(objects)
+}
+
+/// The store image holding `objects`.
+pub fn encode_store_image(objects: &[&[u8]]) -> Result<Vec<u8>, Malformed> {
+    let mut out = Vec::new();
+    put_header(&mut out, Kind::StoreImage);
+    let count = u32::try_from(objects.len()).map_err(|_| Malformed::TooLarge)?;
+    out.extend_from_slice(&count.to_le_bytes());
+    for object in objects {
+        put_long_field(&mut out, object)?;
+    }
+    if out.len() > MAX_STORE_IMAGE_LEN {
+        return Err(Malformed::TooLarge);
+    }
+    Ok(out)
 }

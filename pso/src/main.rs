@@ -239,6 +239,9 @@ struct StoreArgs {
     /// A root's public key; repeat for each
     #[arg(long = "root", value_name = "PUBLIC")]
     roots: Vec<PathBuf>,
+    /// Write the store image a kernel reads at boot, and list nothing
+    #[arg(long, value_name = "FILE")]
+    image: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -288,6 +291,16 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
         .open(path)
         .and_then(|mut file| file.write_all(bytes))
         .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Writes `bytes` to `path` in one step, so that a reader never finds a
+/// partial file: the image is written beside where it goes and renamed.
+fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut beside = path.as_os_str().to_owned();
+    beside.push(".new");
+    let beside = PathBuf::from(beside);
+    fs::write(&beside, bytes).with_context(|| format!("writing {}", beside.display()))?;
+    fs::rename(&beside, path).with_context(|| format!("writing {}", path.display()))
 }
 
 fn new_key(new: &NewKey, default_type: KeyType) -> Result<()> {
@@ -690,6 +703,13 @@ fn describe_warrant(warrant: &Warrant) -> String {
 fn show_store(args: &StoreArgs) -> Result<()> {
     let roots = load_roots(&args.roots)?;
     let loaded = store::load(&args.root, &roots)?;
+    if let Some(path) = &args.image {
+        let image = loaded
+            .store
+            .to_image()
+            .map_err(|e| anyhow!("the store is too large: {e:?}"))?;
+        return replace(path, &image);
+    }
     for hash in loaded.store.enabled() {
         println!("enabled      {}", hex::encode(hash));
     }

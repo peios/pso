@@ -45,6 +45,11 @@ impl<'a> Reader<'a> {
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
+    pub(crate) fn u32(&mut self) -> Result<u32, Malformed> {
+        let bytes = self.take(4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
     pub(crate) fn hash(&mut self) -> Result<[u8; 64], Malformed> {
         let mut hash = [0u8; 64];
         hash.copy_from_slice(self.take(64)?);

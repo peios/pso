@@ -16,7 +16,7 @@
 //! key checks both against what it unseals.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -36,11 +36,28 @@ const SEED_LEN: usize = 32;
 /// Only the owner reads or writes a secret key.
 const SECRET_MODE: u32 = 0o600;
 /// Where a seed's randomness comes from.
-const RANDOM_SOURCE: &str = "/dev/urandom";
-
-/// Fills `bytes` from the system's randomness.
+/// Fills `bytes` from the kernel's random number generator.
+///
+/// It uses getrandom(2) rather than reading `/dev/urandom`: that needs no
+/// `/dev`, so it works in a chroot and early in boot, and it blocks until
+/// the generator is seeded rather than ever returning predictable bytes.
 pub(crate) fn random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
-    fs::File::open(RANDOM_SOURCE).and_then(|mut source| source.read_exact(bytes))
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let rest = &mut bytes[filled..];
+        // SAFETY: the kernel writes at most `rest.len()` bytes into `rest`,
+        // which is valid for that many bytes for the whole call.
+        let got = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+        if got < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        filled += got as usize;
+    }
+    Ok(())
 }
 
 /// The key type `name` gives, as a key file and the command line write it.
@@ -61,7 +78,7 @@ impl SecretKey {
     /// A new key of `key_type`, from the system's randomness.
     pub fn generate(key_type: KeyType) -> Result<Self> {
         let mut seed = zeroize::Zeroizing::new([0u8; SEED_LEN]);
-        random_bytes(&mut *seed).with_context(|| format!("reading {RANDOM_SOURCE}"))?;
+        random_bytes(&mut *seed).context("drawing a random seed")?;
         Ok(Self { key_type, seed })
     }
 

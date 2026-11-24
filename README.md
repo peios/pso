@@ -87,9 +87,12 @@ reads at boot. `pso help` describes each.
 
 ## Passphrases
 
-A sealed key file is one line, `pso-sealed-key <type> <hex>`, whose blob is
-peios-crypto's `PEIOSEAL` v1 format: Argon2id with its parameters recorded
-in the file, and AES-256-GCM over the key's type and seed. It is the format
+A sealed key file is one line, `pso-sealed-key <type> <key hash> <hex>`,
+whose blob is peios-crypto's `PEIOSEAL` v1 format: Argon2id with its
+parameters recorded in the file, and AES-256-GCM over the key's type and
+seed. The type and key hash say which key the file holds without its
+passphrase, so `pso key public` describes a sealed key without asking for
+one; opening the key checks both against what it unseals. It is the format
 the CA (pki) seals its keys in, so the two share one implementation's
 worth of rules, and `vectors/peioseal.vectors` proves they agree.
 

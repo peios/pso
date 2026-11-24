@@ -106,10 +106,14 @@ fn a_new_key_is_sealed_by_default_and_opens_only_with_its_passphrase() {
         &["root", "--out", "root.key", "--new-passphrase-file", "pass"],
     );
     let text = fs::read_to_string(directory.join("root.key")).unwrap();
-    assert!(
-        text.starts_with("pso-sealed-key ml-dsa-87 5045494f5345414c"),
-        "{text}"
-    );
+    let words: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(words[..2], ["pso-sealed-key", "ml-dsa-87"], "{text}");
+    assert!(words[3].starts_with("5045494f5345414c"), "{text}");
+    // The line names the key without the passphrase, as `made` printed it.
+    assert!(made.contains(words[2]), "{made} {text}");
+    let described = ok(directory, &["key", "public", "root.key"]);
+    assert!(described.starts_with(&made), "{described}");
+    assert!(described.contains("as recorded in the file"), "{described}");
     let mode = fs::metadata(directory.join("root.key"))
         .unwrap()
         .permissions()
@@ -377,6 +381,49 @@ fn a_passphrase_is_read_from_a_descriptor() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), made);
+}
+
+#[test]
+fn a_sealed_key_whose_line_names_another_key_is_refused() {
+    let directory = workspace();
+    let directory = directory.path();
+    ok(
+        directory,
+        &[
+            "key",
+            "new",
+            "--out",
+            "a.key",
+            "--new-passphrase-file",
+            "pass",
+        ],
+    );
+    ok(
+        directory,
+        &[
+            "key",
+            "new",
+            "--out",
+            "b.key",
+            "--new-passphrase-file",
+            "pass",
+        ],
+    );
+    let a = fs::read_to_string(directory.join("a.key")).unwrap();
+    let b = fs::read_to_string(directory.join("b.key")).unwrap();
+    let a: Vec<&str> = a.split_whitespace().collect();
+    let b: Vec<&str> = b.split_whitespace().collect();
+    // a's blob under b's key hash.
+    fs::write(
+        directory.join("a.key"),
+        format!("{} {} {} {}\n", a[0], a[1], b[2], a[3]),
+    )
+    .unwrap();
+    let refused = failure(
+        directory,
+        &["key", "public", "a.key", "--passphrase-file", "pass"],
+    );
+    assert!(refused.contains("not the one the file names"), "{refused}");
 }
 
 #[test]

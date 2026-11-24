@@ -367,7 +367,7 @@ fn run(command: Command, pass: &Passphrases) -> Result<ExitCode> {
     match command {
         Command::Root(new) => new_key(&new, KeyType::MlDsa87, pass)?,
         Command::Key(KeyCommand::New(new)) => new_key(&new, KeyType::MlDsa65, pass)?,
-        Command::Key(KeyCommand::Public { key }) => print_public(&public_of(&key, pass)?),
+        Command::Key(KeyCommand::Public { key }) => describe_key(&key, pass)?,
         Command::Key(KeyCommand::Encrypt { key }) => encrypt_key(&key, pass)?,
         Command::Key(KeyCommand::Passphrase { key }) => change_passphrase(&key, pass)?,
         Command::Cert(CertCommand::TopLevel(args)) => top_level(&args, pass)?,
@@ -499,13 +499,23 @@ fn save_certificate(
 
 /// The public key that the key file at `path` holds or, for a secret key
 /// file, gives.
-fn public_of(path: &Path, pass: &Passphrases) -> Result<Key> {
+/// The type and key hash of the key file at `path`. A sealed key is
+/// described from its file without its passphrase, as recorded there.
+fn describe_key(path: &Path, pass: &Passphrases) -> Result<()> {
     if let Ok(key) = keys::load_public(path) {
-        return Ok(key);
+        print_public(&key);
+        return Ok(());
     }
     let file =
         keys::KeyFile::read(path).map_err(|_| anyhow!("{}: not a key file", path.display()))?;
-    Ok(file.open(&pass.opening())?.public())
+    if file.is_sealed() && pass.passphrase_fd.is_none() && pass.passphrase_file.is_none() {
+        println!("type      {}", file.key_type().name());
+        println!("key hash  {}", hex::encode(&file.key_hash()));
+        println!("sealed    as recorded in the file; give a passphrase to check it");
+        return Ok(());
+    }
+    print_public(&file.open(&pass.opening())?.public());
+    Ok(())
 }
 
 fn print_public(key: &Key) {

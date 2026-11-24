@@ -5,14 +5,15 @@
 //!
 //! ```text
 //! pso-secret-key ml-dsa-65 <seed in hexadecimal>
-//! pso-sealed-key ml-dsa-65 <sealed blob in hexadecimal>
+//! pso-sealed-key ml-dsa-65 <key hash> <sealed blob in hexadecimal>
 //! pso-public-key ml-dsa-65 <key in hexadecimal>
 //! ```
 //!
 //! A sealed key's blob is peios-crypto's `PEIOSEAL` format (see
 //! [`crate::seal`]) over the key type's byte followed by the seed. The type
-//! on the line is a hint, for saying what a file holds without its
-//! passphrase; the sealed byte is what counts, and the two must agree.
+//! and the public key's key hash on the line say which key a file holds
+//! without its passphrase. They are not covered by the seal, so opening the
+//! key checks both against what it unseals.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -160,8 +161,9 @@ impl SecretKey {
         plaintext.extend_from_slice(&*self.seed);
         let blob = seal::seal(&plaintext, passphrase.bytes()).context("sealing the key")?;
         Ok(format!(
-            "{SEALED_LABEL} {} {}\n",
+            "{SEALED_LABEL} {} {} {}\n",
             self.key_type.name(),
+            hex::encode(&self.public().hash(&RustCrypto)),
             hex::encode(&blob)
         ))
     }
@@ -176,6 +178,7 @@ pub enum KeyFile {
     Sealed {
         path: PathBuf,
         key_type: KeyType,
+        key_hash: pso_core::Hash,
         blob: Vec<u8>,
     },
 }
@@ -189,10 +192,12 @@ impl KeyFile {
                 .map_err(|_| anyhow!("{}: cannot read the key", path.display()))?,
         );
         let not_a_key = || anyhow!("{}: not a secret key file", path.display());
-        let (label, key_type, body) = split_line(&text).map_err(|_| not_a_key())?;
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let (&label, &key_type) = (words.first().zip(words.get(1))).ok_or_else(not_a_key)?;
+        let key_type = key_type_from_name(key_type).map_err(|_| not_a_key())?;
         let path = path.to_owned();
-        match label {
-            SECRET_LABEL => {
+        match (label, &words[2..]) {
+            (SECRET_LABEL, &[body]) => {
                 let seed = zeroize::Zeroizing::new(hex::decode(body).map_err(|_| not_a_key())?);
                 let seed = <[u8; SEED_LEN]>::try_from(seed.as_slice()).map_err(|_| not_a_key())?;
                 Ok(Self::Plain {
@@ -200,7 +205,8 @@ impl KeyFile {
                     key: SecretKey::from_seed(key_type, seed),
                 })
             }
-            SEALED_LABEL => {
+            (SEALED_LABEL, &[key_hash, body]) => {
+                let key_hash = hex::decode_hash(key_hash).map_err(|_| not_a_key())?;
                 let blob = hex::decode(body).map_err(|_| not_a_key())?;
                 if !seal::looks_sealed(&blob) {
                     return Err(not_a_key());
@@ -208,6 +214,7 @@ impl KeyFile {
                 Ok(Self::Sealed {
                     path,
                     key_type,
+                    key_hash,
                     blob,
                 })
             }
@@ -228,6 +235,15 @@ impl KeyFile {
         }
     }
 
+    /// The key hash of its public key, which for a sealed file is the
+    /// line's claim until it is opened.
+    pub fn key_hash(&self) -> pso_core::Hash {
+        match self {
+            Self::Plain { key, .. } => key.public().hash(&RustCrypto),
+            Self::Sealed { key_hash, .. } => *key_hash,
+        }
+    }
+
     /// The key, asking `source` for the passphrase if the file is sealed.
     pub fn open(self, source: &Source) -> Result<SecretKey> {
         match self {
@@ -235,6 +251,7 @@ impl KeyFile {
             Self::Sealed {
                 path,
                 key_type,
+                key_hash,
                 blob,
             } => {
                 let passphrase = source.read(&path.display().to_string())?;
@@ -252,7 +269,14 @@ impl KeyFile {
                     );
                 }
                 let seed = <[u8; SEED_LEN]>::try_from(seed).map_err(|_| malformed())?;
-                Ok(SecretKey::from_seed(sealed_type, seed))
+                let key = SecretKey::from_seed(sealed_type, seed);
+                if key.public().hash(&RustCrypto) != key_hash {
+                    bail!(
+                        "{}: the sealed key is not the one the file names",
+                        path.display()
+                    );
+                }
+                Ok(key)
             }
         }
     }

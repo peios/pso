@@ -8,7 +8,9 @@
 pub mod hex;
 pub mod issue;
 pub mod keys;
+pub mod passphrase;
 pub mod place;
+pub mod seal;
 pub mod store;
 
 pub use pso_core as core;

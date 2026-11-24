@@ -16,7 +16,7 @@ use pso::core::{
 use pso::keys::{self, SecretKey};
 use pso::place::{self, Search};
 use pso::store::{self, DirectoryLookup};
-use pso::{hex, issue};
+use pso::{hex, issue, passphrase};
 
 /// What a public key file's name adds to its secret key file's.
 const PUBLIC_SUFFIX: &str = ".pub";
@@ -29,6 +29,69 @@ const KNOWN_FLAGS: &[&str] = &["Revoke", "Repository", "TrustStore"];
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    #[command(flatten)]
+    passphrases: Passphrases,
+}
+
+/// Where passphrases come from. Without these, a passphrase is asked for on
+/// the terminal. None is ever taken from the command line itself.
+#[derive(Args)]
+struct Passphrases {
+    /// Read the passphrase of a sealed key being opened from descriptor FD
+    #[arg(
+        long,
+        global = true,
+        value_name = "FD",
+        conflicts_with = "passphrase_file"
+    )]
+    passphrase_fd: Option<i32>,
+    /// Read the passphrase of a sealed key being opened from FILE
+    #[arg(long, global = true, value_name = "FILE")]
+    passphrase_file: Option<PathBuf>,
+    /// Read the passphrase that seals a new key from descriptor FD
+    #[arg(
+        long,
+        global = true,
+        value_name = "FD",
+        conflicts_with = "new_passphrase_file"
+    )]
+    new_passphrase_fd: Option<i32>,
+    /// Read the passphrase that seals a new key from FILE
+    #[arg(long, global = true, value_name = "FILE")]
+    new_passphrase_file: Option<PathBuf>,
+}
+
+impl Passphrases {
+    fn opening(&self) -> passphrase::Source {
+        passphrase::Source::from_options(
+            self.passphrase_fd,
+            self.passphrase_file.as_deref(),
+            "give --passphrase-fd or --passphrase-file",
+        )
+    }
+
+    fn sealing(&self) -> passphrase::Source {
+        passphrase::Source::from_options(
+            self.new_passphrase_fd,
+            self.new_passphrase_file.as_deref(),
+            "give --new-passphrase-fd or --new-passphrase-file, or --no-passphrase for a plain key",
+        )
+    }
+
+    /// Opens the secret key file at `path`, asking for a passphrase only
+    /// if it is sealed.
+    fn open(&self, path: &Path) -> Result<SecretKey> {
+        SecretKey::load_with(path, &self.opening())
+    }
+
+    /// Writes `secret` to a new file at `path`, sealed unless `plain`.
+    fn save(&self, secret: &SecretKey, path: &Path, plain: bool) -> Result<()> {
+        if plain {
+            return secret.save(path);
+        }
+        let passphrase = self.sealing().read_new(&path.display().to_string())?;
+        secret.save_sealed(path, &passphrase)
+    }
 }
 
 #[derive(Subcommand)]
@@ -59,10 +122,14 @@ enum Command {
 
 #[derive(Subcommand)]
 enum KeyCommand {
-    /// Make a key
+    /// Make a key, sealed under a passphrase unless --no-passphrase
     New(NewKey),
     /// Print the type and key hash of a key, from its secret or its public key file
     Public { key: PathBuf },
+    /// Seal a plain secret key file under a passphrase, in place
+    Encrypt { key: PathBuf },
+    /// Change the passphrase a secret key file is sealed under
+    Passphrase { key: PathBuf },
 }
 
 #[derive(Args)]
@@ -73,6 +140,9 @@ struct NewKey {
     /// Where the secret key goes; the public key goes beside it, with .pub added
     #[arg(long, value_name = "FILE")]
     out: PathBuf,
+    /// Write the secret key in the clear, for development and tests
+    #[arg(long)]
+    no_passphrase: bool,
 }
 
 #[derive(Subcommand)]
@@ -103,6 +173,10 @@ struct TopLevel {
     out: PathBuf,
 }
 
+/// A key made for a certificate, to be saved with it: the key, where it
+/// goes, and whether it is written in the clear.
+type MadeKey<'a> = (SecretKey, &'a Path, bool);
+
 /// The key a certificate is for: one that exists, or one made for it.
 #[derive(Args)]
 struct Subject {
@@ -121,12 +195,15 @@ struct Subject {
         requires = "new_key"
     )]
     key_type: String,
+    /// Write the key --new-key makes in the clear, for development and tests
+    #[arg(long, requires = "new_key")]
+    no_passphrase: bool,
 }
 
 impl Subject {
     /// The public key the certificate is for, and the secret key to save
     /// once the certificate is issued, if one was made.
-    fn resolve(&self) -> Result<(Key, Option<(SecretKey, &Path)>)> {
+    fn resolve(&self) -> Result<(Key, Option<MadeKey<'_>>)> {
         match (&self.key, &self.new_key) {
             (Some(public), None) => Ok((keys::load_public(public)?, None)),
             (None, Some(path)) => {
@@ -134,7 +211,7 @@ impl Subject {
                     bail!("{}: exists, and a key is never replaced", path.display());
                 }
                 let secret = SecretKey::generate(keys::key_type_from_name(&self.key_type)?)?;
-                Ok((secret.public(), Some((secret, path))))
+                Ok((secret.public(), Some((secret, path, self.no_passphrase))))
             }
             _ => bail!("give --key or --new-key"),
         }
@@ -276,7 +353,8 @@ struct StoreArgs {
 }
 
 fn main() -> ExitCode {
-    match run(Cli::parse().command) {
+    let cli = Cli::parse();
+    match run(cli.command, &cli.passphrases) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("pso: {error:#}");
@@ -285,16 +363,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(command: Command) -> Result<ExitCode> {
+fn run(command: Command, pass: &Passphrases) -> Result<ExitCode> {
     match command {
-        Command::Root(new) => new_key(&new, KeyType::MlDsa87)?,
-        Command::Key(KeyCommand::New(new)) => new_key(&new, KeyType::MlDsa65)?,
-        Command::Key(KeyCommand::Public { key }) => print_public(&public_of(&key)?),
-        Command::Cert(CertCommand::TopLevel(args)) => top_level(&args)?,
-        Command::Cert(CertCommand::Intermediary(args)) => intermediary(&args)?,
-        Command::Sign(args) => sign(&args)?,
+        Command::Root(new) => new_key(&new, KeyType::MlDsa87, pass)?,
+        Command::Key(KeyCommand::New(new)) => new_key(&new, KeyType::MlDsa65, pass)?,
+        Command::Key(KeyCommand::Public { key }) => describe_key(&key, pass)?,
+        Command::Key(KeyCommand::Encrypt { key }) => encrypt_key(&key, pass)?,
+        Command::Key(KeyCommand::Passphrase { key }) => change_passphrase(&key, pass)?,
+        Command::Cert(CertCommand::TopLevel(args)) => top_level(&args, pass)?,
+        Command::Cert(CertCommand::Intermediary(args)) => intermediary(&args, pass)?,
+        Command::Sign(args) => sign(&args, pass)?,
         Command::Verify(args) => return verify(&args),
-        Command::Revoke(args) => revoke(&args)?,
+        Command::Revoke(args) => revoke(&args, pass)?,
         Command::Distrust(args) => distrust(&args)?,
         Command::Show { object } => show(&read(&object)?)?,
         Command::Hash { object } => {
@@ -332,26 +412,66 @@ fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(&beside, path).with_context(|| format!("writing {}", path.display()))
 }
 
-fn new_key(new: &NewKey, default_type: KeyType) -> Result<()> {
+fn new_key(new: &NewKey, default_type: KeyType, pass: &Passphrases) -> Result<()> {
     let key_type = match &new.key_type {
         Some(name) => keys::key_type_from_name(name)?,
         None => default_type,
     };
     let secret = SecretKey::generate(key_type)?;
-    save_key_pair(&secret, &new.out)?;
+    save_key_pair(&secret, &new.out, new.no_passphrase, pass)?;
     print_public(&secret.public());
     Ok(())
 }
 
-/// Writes `secret` to a new file at `path`, and its public key beside it.
-fn save_key_pair(secret: &SecretKey, path: &Path) -> Result<()> {
+/// Writes `secret` to a new file at `path`, sealed unless `plain`, and its
+/// public key beside it.
+fn save_key_pair(secret: &SecretKey, path: &Path, plain: bool, pass: &Passphrases) -> Result<()> {
     let mut public_path = path.to_owned().into_os_string();
     public_path.push(PUBLIC_SUFFIX);
-    secret.save(path)?;
+    if Path::new(&public_path).exists() {
+        bail!(
+            "{}: exists, and a key is never replaced",
+            Path::new(&public_path).display()
+        );
+    }
+    pass.save(secret, path, plain)?;
     write_new(
         Path::new(&public_path),
         keys::format_public(&secret.public()).as_bytes(),
     )
+}
+
+/// Seals the plain key file at `path` under a new passphrase, in place.
+fn encrypt_key(path: &Path, pass: &Passphrases) -> Result<()> {
+    let file = keys::KeyFile::read(path)?;
+    if file.is_sealed() {
+        bail!(
+            "{}: already sealed; use pso key passphrase to change its passphrase",
+            path.display()
+        );
+    }
+    let secret = file.open_plain()?;
+    let passphrase = pass.sealing().read_new(&path.display().to_string())?;
+    secret.replace_sealed(path, &passphrase)?;
+    eprintln!(
+        "pso: sealed {}; the plain key's old bytes may remain on the disk",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Seals the sealed key file at `path` under a new passphrase, in place.
+fn change_passphrase(path: &Path, pass: &Passphrases) -> Result<()> {
+    let file = keys::KeyFile::read(path)?;
+    if !file.is_sealed() {
+        bail!(
+            "{}: not sealed; use pso key encrypt to seal it",
+            path.display()
+        );
+    }
+    let secret = file.open(&pass.opening())?;
+    let passphrase = pass.sealing().read_new(&path.display().to_string())?;
+    secret.replace_sealed(path, &passphrase)
 }
 
 /// Writes a certificate and, if a key was made for it, the key. The
@@ -360,7 +480,8 @@ fn save_key_pair(secret: &SecretKey, path: &Path) -> Result<()> {
 fn save_certificate(
     out: &Path,
     certificate: &Certificate,
-    made: Option<(SecretKey, &Path)>,
+    made: Option<MadeKey<'_>>,
+    pass: &Passphrases,
 ) -> Result<()> {
     if out.exists() {
         bail!(
@@ -368,8 +489,8 @@ fn save_certificate(
             out.display()
         );
     }
-    if let Some((secret, path)) = made {
-        save_key_pair(&secret, path)?;
+    if let Some((secret, path, plain)) = made {
+        save_key_pair(&secret, path, plain, pass)?;
     }
     write_new(out, certificate.bytes())?;
     println!("{}", hex::encode(&certificate.hash(&RustCrypto)));
@@ -378,13 +499,23 @@ fn save_certificate(
 
 /// The public key that the key file at `path` holds or, for a secret key
 /// file, gives.
-fn public_of(path: &Path) -> Result<Key> {
-    match keys::load_public(path) {
-        Ok(key) => Ok(key),
-        Err(_) => Ok(SecretKey::load(path)
-            .map_err(|_| anyhow!("{}: not a key file", path.display()))?
-            .public()),
+/// The type and key hash of the key file at `path`. A sealed key is
+/// described from its file without its passphrase, as recorded there.
+fn describe_key(path: &Path, pass: &Passphrases) -> Result<()> {
+    if let Ok(key) = keys::load_public(path) {
+        print_public(&key);
+        return Ok(());
     }
+    let file =
+        keys::KeyFile::read(path).map_err(|_| anyhow!("{}: not a key file", path.display()))?;
+    if file.is_sealed() && pass.passphrase_fd.is_none() && pass.passphrase_file.is_none() {
+        println!("type      {}", file.key_type().name());
+        println!("key hash  {}", hex::encode(&file.key_hash()));
+        println!("sealed    as recorded in the file; give a passphrase to check it");
+        return Ok(());
+    }
+    print_public(&file.open(&pass.opening())?.public());
+    Ok(())
 }
 
 fn print_public(key: &Key) {
@@ -397,50 +528,50 @@ fn certificate(path: &Path) -> Result<Certificate> {
         .map_err(|error| anyhow!("{}: not a certificate: {error:?}", path.display()))
 }
 
-fn top_level(args: &TopLevel) -> Result<()> {
+fn top_level(args: &TopLevel, pass: &Passphrases) -> Result<()> {
     let warrants = parse_warrants(&args.warrants)?;
     let (certificate, made) = match (&args.root_key, &args.self_signed) {
         (Some(root), None) => {
             let (subject, made) = args.subject.resolve()?;
-            let root = SecretKey::load(root)?;
+            let root = pass.open(root)?;
             (
                 issue::top_level_under_root(&root, &args.name, &subject, warrants)?,
                 made,
             )
         }
         (None, Some(own)) => (
-            issue::top_level_self_signed(&SecretKey::load(own)?, &args.name, warrants)?,
+            issue::top_level_self_signed(&pass.open(own)?, &args.name, warrants)?,
             None,
         ),
         // A new key with no root to sign for it signs itself.
         (None, None) if args.subject.new_key.is_some() => {
             let (_, made) = args.subject.resolve()?;
-            let (secret, path) = made.expect("--new-key makes a key");
+            let (secret, path, plain) = made.expect("--new-key makes a key");
             let certificate = issue::top_level_self_signed(&secret, &args.name, warrants)?;
-            (certificate, Some((secret, path)))
+            (certificate, Some((secret, path, plain)))
         }
         _ => bail!(
             "give --root-key, --self-signed, or --new-key alone to make a key that signs itself"
         ),
     };
-    save_certificate(&args.out, &certificate, made)
+    save_certificate(&args.out, &certificate, made, pass)
 }
 
-fn intermediary(args: &Intermediary) -> Result<()> {
+fn intermediary(args: &Intermediary, pass: &Passphrases) -> Result<()> {
     let (subject, made) = args.subject.resolve()?;
     let certificate = issue::intermediary(
         &certificate(&args.issuer)?,
-        &SecretKey::load(&args.issuer_key)?,
+        &pass.open(&args.issuer_key)?,
         &args.name,
         &subject,
         parse_warrants(&args.warrants)?,
     )?;
-    save_certificate(&args.out, &certificate, made)
+    save_certificate(&args.out, &certificate, made, pass)
 }
 
-fn sign(args: &Sign) -> Result<()> {
+fn sign(args: &Sign, pass: &Passphrases) -> Result<()> {
     let issuer = certificate(&args.issuer)?;
-    let key = SecretKey::load(&args.issuer_key)?;
+    let key = pass.open(&args.issuer_key)?;
     let warrants = parse_warrants(&args.warrants)?;
     let hash_form = match args.place {
         Place::Section => HashForm::Elf,
@@ -618,19 +749,19 @@ fn target(path: &Path) -> Result<(TargetType, [u8; 64], Option<Certificate>)> {
     }
 }
 
-fn revoke(args: &Revoke) -> Result<()> {
+fn revoke(args: &Revoke, pass: &Passphrases) -> Result<()> {
     let (target_type, hash, as_certificate) = target(&args.target)?;
     let revocation = match (&args.signer, &args.signer_key, &args.root_key) {
         (Some(signer), Some(key), None) => issue::revocation_by_certificate(
             &certificate(signer)?,
-            &SecretKey::load(key)?,
+            &pass.open(key)?,
             target_type,
             hash,
         )?,
         (None, None, Some(root)) => {
             let top_level = as_certificate
                 .ok_or_else(|| anyhow!("a root revokes only a top-level it signed"))?;
-            issue::revocation_by_root(&SecretKey::load(root)?, &top_level)?
+            issue::revocation_by_root(&pass.open(root)?, &top_level)?
         }
         _ => bail!("give --signer with --signer-key, or --root-key"),
     };

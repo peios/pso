@@ -26,9 +26,15 @@ fn ok(directory: &Path, arguments: &[&str]) -> String {
 /// A root, a top-level it signs, and a signing certificate beneath that,
 /// with the top-level installed in the trust store of a system at `sys`.
 fn authority(directory: &Path) {
-    ok(directory, &["root", "--out", "root.key"]);
-    ok(directory, &["key", "new", "--out", "top.key"]);
-    ok(directory, &["key", "new", "--out", "signer.key"]);
+    ok(directory, &["root", "--out", "root.key", "--no-passphrase"]);
+    ok(
+        directory,
+        &["key", "new", "--out", "top.key", "--no-passphrase"],
+    );
+    ok(
+        directory,
+        &["key", "new", "--out", "signer.key", "--no-passphrase"],
+    );
     let top = ok(
         directory,
         &[
@@ -193,7 +199,10 @@ fn an_authority_cannot_issue_what_a_verifier_would_refuse() {
     assert!(String::from_utf8_lossy(&outside.stderr).contains("Name warrant does not cover"));
 
     // The signing certificate holds no Delegate, so it issues leaves only.
-    ok(directory, &["key", "new", "--out", "below.key"]);
+    ok(
+        directory,
+        &["key", "new", "--out", "below.key", "--no-passphrase"],
+    );
     let below = pso(
         directory,
         &[
@@ -221,7 +230,7 @@ fn a_secret_key_is_never_replaced_and_only_its_owner_reads_it() {
 
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path();
-    ok(directory, &["root", "--out", "root.key"]);
+    ok(directory, &["root", "--out", "root.key", "--no-passphrase"]);
     let mode = fs::metadata(directory.join("root.key"))
         .unwrap()
         .permissions()
@@ -229,7 +238,7 @@ fn a_secret_key_is_never_replaced_and_only_its_owner_reads_it() {
     assert_eq!(mode & 0o777, 0o600);
     let before = fs::read(directory.join("root.key")).unwrap();
     assert!(
-        !pso(directory, &["root", "--out", "root.key"])
+        !pso(directory, &["root", "--out", "root.key", "--no-passphrase"])
             .status
             .success()
     );
@@ -240,7 +249,7 @@ fn a_secret_key_is_never_replaced_and_only_its_owner_reads_it() {
 fn a_key_hash_is_the_same_from_either_key_file() {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path();
-    let made = ok(directory, &["root", "--out", "root.key"]);
+    let made = ok(directory, &["root", "--out", "root.key", "--no-passphrase"]);
     assert_eq!(ok(directory, &["key", "public", "root.key"]), made);
     assert_eq!(ok(directory, &["key", "public", "root.key.pub"]), made);
     fs::write(directory.join("notes"), "not a key").unwrap();
@@ -251,7 +260,7 @@ fn a_key_hash_is_the_same_from_either_key_file() {
 fn a_certificate_can_be_issued_with_a_key_made_for_it() {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path();
-    ok(directory, &["root", "--out", "root.key"]);
+    ok(directory, &["root", "--out", "root.key", "--no-passphrase"]);
     ok(
         directory,
         &[
@@ -263,6 +272,7 @@ fn a_certificate_can_be_issued_with_a_key_made_for_it() {
             "root.key",
             "--new-key",
             "top.key",
+            "--no-passphrase",
             "--warrant",
             "Delegate=1",
             "--warrant",
@@ -280,6 +290,7 @@ fn a_certificate_can_be_issued_with_a_key_made_for_it() {
             "Signing",
             "--new-key",
             "signer.key",
+            "--no-passphrase",
             "--issuer",
             "top.cert",
             "--issuer-key",
@@ -317,6 +328,7 @@ fn a_certificate_can_be_issued_with_a_key_made_for_it() {
             "Own",
             "--new-key",
             "own.key",
+            "--no-passphrase",
             "--out",
             "own.cert",
         ],
@@ -339,6 +351,7 @@ fn a_refused_certificate_leaves_no_key_behind() {
             "Below",
             "--new-key",
             "below.key",
+            "--no-passphrase",
             "--issuer",
             "signer.cert",
             "--issuer-key",
@@ -363,6 +376,7 @@ fn a_refused_certificate_leaves_no_key_behind() {
             "root.key",
             "--new-key",
             "top.key",
+            "--no-passphrase",
             "--out",
             "again.cert",
         ],

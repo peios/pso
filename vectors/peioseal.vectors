@@ -1,0 +1,32 @@
+# PEIOSEAL v1 vectors: blobs sealed by one implementation, for another to
+# open. Sealing draws a fresh salt and nonce, so a blob can't be regenerated
+# byte for byte; each one was sealed once and is kept as it came out.
+#
+# Each case gives the sealing implementation, the passphrase as typed, the
+# passphrase as sealed (its Unicode NFKC form, UTF-8, in hexadecimal), the
+# plaintext and the blob, both in hexadecimal. A plaintext here is a PSO key
+# file's: the key type byte, then the 32-byte seed.
+
+case peios-crypto-ascii
+sealed-by peios-crypto 623520b (seal_with_passphrase)
+typed correct horse battery staple
+passphrase 636f727265637420686f727365206261747465727920737461706c65
+plaintext 01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+blob 5045494f5345414c0101000100000000000300000004102f1a79538f4482978184cf7626224eb101cd938284c52bc578d2a139fc25416520491b66214495f9e1708c21f78606497030629ba8c69580996b4950ed1d56591dab41a20c537dd00325c645726a
+end
+
+case peios-crypto-nfkc
+sealed-by peios-crypto 623520b (seal_with_passphrase)
+typed café au lait, s’il vous plaît
+passphrase 636166c3a9206175206c6169742c2073e28099696c20766f757320706c61c3ae74
+plaintext 026465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283
+blob 5045494f5345414c010100010000000000030000000410882d86a7c0d63b2019446a2e38b6ce97018879326f833060645fffd6d5ad69d978d0d23a9955e53129149cb9472a35e3bdbed17f91591ad33b6caa87d6537fa3aa210ec0fc5d842f27eec4e04986
+end
+
+case pso-ascii
+sealed-by pso (pso::seal::seal); opened by peios-crypto 623520b open_with_passphrase on 2026-11-24
+typed correct horse battery staple
+passphrase 636f727265637420686f727365206261747465727920737461706c65
+plaintext 01c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7
+blob 5045494f5345414c010100010000000000030000000410b32bdb89ce4dfc3e33d6e5ed53fdc92d0103ae689a68b887e5f13b561d00e20e8b6e1c28701052caa737a709035c33bcd67f113e29d32a31998b8332dc593deb7986b836e7479f73eae495f85c90
+end

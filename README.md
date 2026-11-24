@@ -23,12 +23,18 @@ The repository is not yet built with pekit.
 
 ## Using the command
 
-Make a root. Its secret key goes in `root.key`, which only its owner can
-read, and its public key in `root.key.pub`:
+Make a root. Its secret key goes in `root.key`, sealed under a passphrase
+the command asks for twice, and its public key in `root.key.pub`. Only the
+key file's owner can read it:
 
 ```sh
 pso root --out root.key
 ```
+
+Every key `pso` makes is sealed unless you give `--no-passphrase`, which
+writes it in the clear and is for development and tests. Opening a sealed
+key, to sign with it, asks for its passphrase. See
+[Passphrases](#passphrases).
 
 Have the root sign a top-level certificate, making a key for it in the
 same step. The key goes in `top.key` and `top.key.pub`, and the command
@@ -78,6 +84,43 @@ pso verify repository --bundle repository.pso --root root.key.pub
 withdraw a certificate or a leaf, and `pso store` lists what a system's
 trust store enables, or with `--image` writes the store image a kernel
 reads at boot. `pso help` describes each.
+
+## Passphrases
+
+A sealed key file is one line, `pso-sealed-key <type> <hex>`, whose blob is
+peios-crypto's `PEIOSEAL` v1 format: Argon2id with its parameters recorded
+in the file, and AES-256-GCM over the key's type and seed. It is the format
+the CA (pki) seals its keys in, so the two share one implementation's
+worth of rules, and `vectors/peioseal.vectors` proves they agree.
+
+A passphrase is never given on the command line. Each command takes it
+from one of these, for the key it opens and for a key it seals:
+
+| Opening a key | Sealing a new key | Source |
+|---|---|---|
+| `--passphrase-fd N` | `--new-passphrase-fd N` | Read from an open descriptor |
+| `--passphrase-file FILE` | `--new-passphrase-file FILE` | Read from a file's first line |
+| Neither | Neither | Asked for on the terminal |
+
+The terminal is used only when standard input is one; otherwise the command
+fails and says what to give. A new passphrase needs at least 15
+characters, and every passphrase is normalised to Unicode NFKC first, as
+pki's are, so the same characters typed differently give the same key.
+
+Seal a plain key file in place, or change a sealed key's passphrase:
+
+```sh
+pso key encrypt signer.key
+pso key passphrase signer.key
+```
+
+Both write the new file beside the old one and rename it over it, so a
+failure leaves the old file. Sealing a plain file doesn't scrub the plain
+key's bytes from the disk: if it mattered that they were never written,
+make the key sealed in the first place.
+
+A plain key file, `pso-secret-key <type> <hex>`, still opens without a
+passphrase.
 
 ## Warrants on the command line
 

@@ -20,3 +20,11 @@ publish = false
 codegen-units = 1
 lto = "fat"
 panic = "abort"
+
+# Argon2 is slow unoptimised, and the tests open keys sealed with the real
+# parameters.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
